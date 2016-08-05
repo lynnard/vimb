@@ -25,6 +25,11 @@
 #include "main.h"
 #include "cookiejar.h"
 
+#define LOCK_SH 1    /* shared lock */
+#define LOCK_EX 2    /* exclusive lock */
+#define LOCK_NB 4    /* don't block when locking */
+#define LOCK_UN 8    /* unlock */
+
 G_DEFINE_TYPE(CookieJar, cookiejar, SOUP_TYPE_COOKIE_JAR_TEXT)
 
 static void cookiejar_changed(SoupCookieJar *self, SoupCookie *old, SoupCookie *new);

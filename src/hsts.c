@@ -28,6 +28,11 @@
 #include <glib-object.h>
 #include <libsoup/soup.h>
 
+#define LOCK_SH 1    /* shared lock */
+#define LOCK_EX 2    /* exclusive lock */
+#define LOCK_NB 4    /* don't block when locking */
+#define LOCK_UN 8    /* unlock */
+
 #define HSTS_HEADER_NAME "Strict-Transport-Security"
 #define HSTS_FILE_FORMAT "%s\t%s\t%c\n"
 #define HSTS_PROVIDER_GET_PRIVATE(o)  (G_TYPE_INSTANCE_GET_PRIVATE((o), HSTS_TYPE_PROVIDER, HSTSProviderPrivate))
