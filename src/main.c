@@ -20,6 +20,7 @@
 #include <gdk/gdkx.h>
 #include <gtk/gtk.h>
 #include <gtk/gtkx.h>
+#include <libsoup/soup.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +83,8 @@ static void on_webview_notify_uri(WebKitWebView *webview, GParamSpec *pspec,
         Client *c);
 static void on_webview_ready_to_show(WebKitWebView *webview, Client *c);
 static gboolean on_webview_web_process_crashed(WebKitWebView *webview, Client *c);
+static gboolean on_webview_authenticate(WebKitWebView *webview,
+        WebKitAuthenticationRequest *request, Client *c);
 static gboolean on_window_delete_event(GtkWidget *window, GdkEvent *event, Client *c);
 static void on_window_destroy(GtkWidget *window, Client *c);
 static gboolean quit(Client *c);
@@ -111,12 +114,19 @@ struct Vimb vb;
 gboolean vb_download_set_destination(Client *c, WebKitDownload *download,
     char *suggested_filename, const char *path)
 {
-    char *download_path, *dir, *file, *uri;
+    char *download_path, *dir, *file, *uri, *basename = NULL,
+         *decoded_uri = NULL;
+    const char *download_uri;
     download_path = GET_CHAR(c, "download-path");
 
-    /* For unnamed downloads set default filename. */
     if (!suggested_filename || !*suggested_filename) {
-        suggested_filename = "vimb-download";
+        /* Try to find a matching name if there is no suggested filename. */
+        download_uri = webkit_uri_request_get_uri(webkit_download_get_request(download));
+        decoded_uri  = soup_uri_decode(download_uri);
+        basename     = g_filename_display_basename(decoded_uri);
+        g_free(decoded_uri);
+
+        suggested_filename = basename;
     }
 
     /* Prepare the path to save the download. */
@@ -132,6 +142,8 @@ gboolean vb_download_set_destination(Client *c, WebKitDownload *download,
     } else {
         file = util_build_path(c, suggested_filename, download_path);
     }
+
+    g_free(basename);
 
     if (!file) {
         return FALSE;
@@ -643,6 +655,10 @@ static void client_destroy(Client *c)
         vb.clients = c->next;
     }
 
+    if (c->state.search.last_query) {
+        g_free(c->state.search.last_query);
+    }
+
     completion_cleanup(c);
     map_cleanup(c);
     register_cleanup(c);
@@ -995,6 +1011,14 @@ static void on_webctx_init_web_extension(WebKitWebContext *webctx, gpointer data
     const char *name;
     GVariant *vdata;
 
+#ifdef DEBUG
+    char *extension = g_build_filename(EXTENSIONDIR,  "webext_main.so", NULL);
+    if (!g_file_test(extension, G_FILE_TEST_IS_REGULAR)) {
+        g_warning("Cannot access web extension %s", extension);
+    }
+    g_free(extension);
+#endif
+
     /* Setup the extension directory. */
     webkit_web_context_set_web_extensions_directory(webctx, EXTENSIONDIR);
 
@@ -1234,11 +1258,11 @@ static void on_webview_load_changed(WebKitWebView *webview,
         WebKitLoadEvent event, Client *c)
 {
     GTlsCertificateFlags tlsflags;
-    const char *uri;
+    char *uri = NULL;
 
     switch (event) {
         case WEBKIT_LOAD_STARTED:
-            uri = webkit_web_view_get_uri(webview);
+            uri = util_sanitize_uri(webkit_web_view_get_uri(webview));
 #ifdef FEATURE_AUTOCMD
             autocmd_run(c, AU_LOAD_STARTED, uri, NULL);
 #endif
@@ -1259,7 +1283,13 @@ static void on_webview_load_changed(WebKitWebView *webview,
             break;
 
         case WEBKIT_LOAD_COMMITTED:
-            uri = webkit_web_view_get_uri(webview);
+            /* In case of HTTP authentication request we ignore the focus
+             * changes so that the input mode can be set for the
+             * authentication request. If the authentication dialog is filled
+             * or aborted the load will be commited. So this seems to be the
+             * right place to remove the flag. */
+            c->mode->flags &= ~FLAG_IGNORE_FOCUS;
+            uri = util_sanitize_uri(webkit_web_view_get_uri(webview));
 #ifdef FEATURE_AUTOCMD
             autocmd_run(c, AU_LOAD_COMMITTED, uri, NULL);
 #endif
@@ -1286,7 +1316,7 @@ static void on_webview_load_changed(WebKitWebView *webview,
             break;
 
         case WEBKIT_LOAD_FINISHED:
-            uri = webkit_web_view_get_uri(webview);
+            uri = util_sanitize_uri(webkit_web_view_get_uri(webview));
 #ifdef FEATURE_AUTOCMD
             autocmd_run(c, AU_LOAD_FINISHED, uri, NULL);
 #endif
@@ -1295,6 +1325,10 @@ static void on_webview_load_changed(WebKitWebView *webview,
                 history_add(c, HISTORY_URL, uri, webkit_web_view_get_title(webview));
             }
             break;
+    }
+
+    if (uri) {
+        g_free(uri);
     }
 }
 
@@ -1307,7 +1341,7 @@ static void on_webview_mouse_target_changed(WebKitWebView *webview,
         WebKitHitTestResult *result, guint modifiers, Client *c)
 {
     char *msg;
-    const char *uri;
+    char *uri;
 
     /* Save the hitTestResult to have this later available for events that
      * don't support this. */
@@ -1317,15 +1351,17 @@ static void on_webview_mouse_target_changed(WebKitWebView *webview,
     c->state.hit_test_result = g_object_ref(result);
 
     if (webkit_hit_test_result_context_is_link(result)) {
-        uri = webkit_hit_test_result_get_link_uri(result);
+        uri = util_sanitize_uri(webkit_hit_test_result_get_link_uri(result));
         msg = g_strconcat("Link: ", uri, NULL);
         gtk_label_set_text(GTK_LABEL(c->statusbar.left), msg);
         g_free(msg);
+        g_free(uri);
     } else if (webkit_hit_test_result_context_is_image(result)) {
-        uri = webkit_hit_test_result_get_image_uri(result);
+        uri = util_sanitize_uri(webkit_hit_test_result_get_image_uri(result));
         msg = g_strconcat("Image: ", uri, NULL);
         gtk_label_set_text(GTK_LABEL(c->statusbar.left), msg);
         g_free(msg);
+        g_free(uri);
     } else {
         /* No link under cursor - show the current URI. */
         update_urlbar(c);
@@ -1364,7 +1400,11 @@ static void on_webview_notify_title(WebKitWebView *webview, GParamSpec *pspec, C
  */
 static void on_webview_notify_uri(WebKitWebView *webview, GParamSpec *pspec, Client *c)
 {
-    OVERWRITE_STRING(c->state.uri, webkit_web_view_get_uri(c->webview));
+    if (c->state.uri) {
+        g_free(c->state.uri);
+    }
+    c->state.uri = util_sanitize_uri(webkit_web_view_get_uri(c->webview));
+
     update_urlbar(c);
     g_setenv("VIMB_URI", c->state.uri, TRUE);
 }
@@ -1386,6 +1426,22 @@ static gboolean on_webview_web_process_crashed(WebKitWebView *webview, Client *c
     vb_echo(c, MSG_ERROR, FALSE, "Webview Crashed on %s", webkit_web_view_get_uri(webview));
 
     return TRUE;
+}
+
+/**
+ * Callback in case HTTP authentication is requested by the server.
+ */
+static gboolean on_webview_authenticate(WebKitWebView *webview,
+        WebKitAuthenticationRequest *request, Client *c)
+{
+    /* Don't change the mode if we are in pass through mode. */
+    if (c->mode->id == 'n') {
+        vb_enter(c, 'i');
+        /* Make sure we do not switch back to normal mode in case a previos
+         * page is open and looses the focus. */
+        c->mode->flags |= FLAG_IGNORE_FOCUS;
+    }
+    return FALSE;
 }
 
 /**
@@ -1494,7 +1550,6 @@ static void update_urlbar(Client *c)
         g_string_append_printf(str, "[%s] ", vb.profile);
     }
 
-    /* show current url */
     g_string_append_printf(str, "%s", c->state.uri);
 
     /* show history indicator only if there is something to show */
@@ -1741,6 +1796,7 @@ static WebKitWebView *webview_new(Client *c, WebKitWebView *webview)
         "signal::notify::uri", G_CALLBACK(on_webview_notify_uri), c,
         "signal::ready-to-show", G_CALLBACK(on_webview_ready_to_show), c,
         "signal::web-process-crashed", G_CALLBACK(on_webview_web_process_crashed), c,
+        "signal::authenticate", G_CALLBACK(on_webview_authenticate), c,
         NULL
     );
 
@@ -1771,7 +1827,7 @@ static void on_script_message_focus(WebKitUserContentManager *manager,
     g_variant_unref(variant);
 
     c = vb_get_client_for_page_id(pageid);
-    if (!c) {
+    if (!c || c->mode->flags & FLAG_IGNORE_FOCUS) {
         return;
     }
 

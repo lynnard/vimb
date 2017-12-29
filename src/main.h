@@ -176,6 +176,7 @@ struct State {
         gboolean    active;         /* indicate if there is a active search */
         short       direction;      /* last direction 1 forward, -1 backward */
         int         matches;        /* number of matching search results */
+        char        *last_query;    /* last search query */
     } search;
 };
 
@@ -194,11 +195,12 @@ struct Mode {
     ModeTransitionFunc   leave;         /* is called if the mode is left */
     ModeKeyFunc          keypress;      /* receives key to process */
     ModeInputChangedFunc input_changed; /* is triggered if input textbuffer is changed */
-#define FLAG_NOMAP       0x0001  /* disables mapping for key strokes */
-#define FLAG_HINTING     0x0002  /* marks active hinting submode */
-#define FLAG_COMPLETION  0x0004  /* marks active completion submode */
-#define FLAG_PASSTHROUGH 0x0008  /* don't handle any other keybind than <esc> */
-#define FLAG_NEW_WIN     0x0010  /* enforce opening of pages into new window */
+#define FLAG_NOMAP          0x0001  /* disables mapping for key strokes */
+#define FLAG_HINTING        0x0002  /* marks active hinting submode */
+#define FLAG_COMPLETION     0x0004  /* marks active completion submode */
+#define FLAG_PASSTHROUGH    0x0008  /* don't handle any other keybind than <esc> */
+#define FLAG_NEW_WIN        0x0010  /* enforce opening of pages into new window */
+#define FLAG_IGNORE_FOCUS   0x0012  /* do not listen for focus change messages */
     unsigned int         flags;
 };
 
